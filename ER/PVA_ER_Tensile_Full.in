@@ -1,0 +1,175 @@
+#mpirun -np 8 --bind-to socket -x OMP_NUM_THREADS=2 lmp -sf hybrid omp gpu -pk gpu 2 -in MullerPlatheReference-Crystallization_5m_210C.in
+#
+# ----------------- Init Section -----------------
+# sets up simulation
+variable tms        equal 5.0
+variable tdamp      equal ${tms}*100.0
+variable pdamp      equal ${tms}*1000.0
+
+#-----------------------------------------------------------
+# Simualtion Variables
+#-----------------------------------------------------------
+variable fname string MullerPlatheReference
+variable pint  string 500
+variable mint  string 500
+
+# print directory
+variable print_dir string 'er-tensile'
+# data directory
+variable data_dir string 'er-data'
+
+shell mkdir ${print_dir}
+
+#-----------------------------------------------------------
+# Read
+#-----------------------------------------------------------
+# # Plathe Work
+
+units		real
+atom_style	molecular
+
+bond_style harmonic
+angle_style   table spline 181
+pair_style  lj/cut/gpu 11.0
+
+read_data    ${data_dir}/PVA_ER_p500_m500_real.data
+
+change_box all triclinic 
+
+group polymer type 1
+mass 1 44.0
+
+# Plathe Work
+bond_coeff 1 100.0 2.66
+angle_coeff   1 ${data_dir}/CG-REAL-ER.PVA CG_PVA
+
+pair_modify shift yes
+variable alpha equal 0.85*1.85
+variable beta equal 4.7*1.024
+pair_coeff * * ${alpha} ${beta} 11.0
+
+# 2020 changed xyz to iso, added temp
+thermo		1000
+timestep	${tms}
+
+compute pe all pe/atom
+compute ke all ke/atom
+compute cpe all reduce ave c_pe
+compute cke all reduce ave c_ke
+
+thermo_style custom step temp c_cpe c_cke etotal press vol density
+
+variable press equal 1.0 # atomospheric pressure
+
+special_bonds lj 0.0 0.0 1.0
+
+dump 1 all custom 10000 ${print_dir}/PVA-ER.dump id mol type x y z ix iy iz
+
+label converge_loop
+variable converge_step loop 10
+	# do things
+	fix		1 all npt temp 1700.0 1700.0 ${tdamp} x ${press} ${press} ${pdamp} y ${press} ${press} ${pdamp} z ${press} ${press} ${pdamp}
+	run		500000
+
+	# if per atom energy is less than x, force convergence to continue
+	variable totalstep equal c_cke+c_cpe
+
+	# if first step, previous total energy is sufficiently large to prevent convergence.
+	if "${converge_step}==1 " then "variable totalprev equal 30000.0"
+
+	# percent difference of n and n-1 step
+	variable diff equal abs(${totalprev}-${totalstep})/${totalprev}*100
+	print "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"
+	print "Previous Total Energy : ${totalprev}"
+	print "Current Total Energy  : ${totalstep}"
+	print "Percent Difference : ${diff}"
+	variable totalprev equal ${totalstep}
+
+	# if less than 1% difference, consider it converged
+	if "${diff}<1.0" then "jump SELF converge_break"
+	print "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"
+
+next converge_step
+jump SELF converge_loop
+label converge_break
+
+undump 1
+
+#-----------------------------------------------------------
+# Set up computes
+#-----------------------------------------------------------
+compute temps all temp
+# Stress/ Atom Method
+compute SAperatom all stress/atom NULL virial
+# average per atom. (Summing and dividing over total volume) and (averaging peratom stress then dividing by single volume) are the same
+compute SApress all reduce sum c_SAperatom[1] c_SAperatom[2] c_SAperatom[3] c_SAperatom[4] c_SAperatom[5] c_SAperatom[6]
+# compute pressure method
+compute SPall all pressure NULL virial
+
+# strain
+variable temps equal c_temps
+
+variable tmpx equal "lx"
+variable tmpy equal "ly"
+variable tmpz equal "lz"
+
+variable Lx0 equal ${tmpx}
+variable Ly0 equal ${tmpy}
+variable Lz0 equal ${tmpz}
+
+variable sysvol equal vol
+
+# Strain
+variable strainx equal "(lx - v_Lx0)/v_Lx0"
+variable strainy equal "(ly - v_Ly0)/v_Ly0"
+variable strainz equal "(lz - v_Lz0)/v_Lz0"
+
+variable sample_rate equal 10
+
+variable SA_stressxx equal c_SApress[1]/v_sysvol*101325
+variable SA_stressyy equal c_SApress[2]/v_sysvol*101325
+variable SA_stresszz equal c_SApress[3]/v_sysvol*101325
+variable SA_stressxy equal c_SApress[4]/v_sysvol*101325
+variable SA_stressxz equal c_SApress[5]/v_sysvol*101325
+variable SA_stressyz equal c_SApress[6]/v_sysvol*101325
+
+#-----------------------------------------------------------
+# Run
+#-----------------------------------------------------------
+
+variable tms        equal 5.0
+variable tdamp      equal ${tms}*100.0
+variable pdamp      equal ${tms}*1000.0
+
+variable time equal step*${tms}
+variable strain equal 1E-6*step*${tms}
+
+thermo		10000
+timestep	${tms}
+thermo_style custom step temp v_time v_strain epair emol etotal density
+
+fix		1 all npt temp 1700 1700 ${tdamp} x ${press} ${press} ${pdamp} y ${press} ${press} ${pdamp} z ${press} ${press} ${pdamp} xy ${press} ${press} ${pdamp} xz ${press} ${press} ${pdamp} yz ${press} ${press} ${pdamp}
+run 	5000000
+
+fix		1 all npt temp 1700 500 ${tdamp} x ${press} ${press} ${pdamp} y ${press} ${press} ${pdamp} z ${press} ${press} ${pdamp} xy ${press} ${press} ${pdamp} xz ${press} ${press} ${pdamp} yz ${press} ${press} ${pdamp}
+#run		1000 # for optimization
+
+run 	5000000
+
+fix		1 all npt temp 500 300 ${tdamp} x ${press} ${press} ${pdamp} y ${press} ${press} ${pdamp} z ${press} ${press} ${pdamp} xy ${press} ${press} ${pdamp} xz ${press} ${press} ${pdamp} yz ${press} ${press} ${pdamp}
+
+run 	5000000
+
+
+write_data    ${print_dir}/PVA_pre_draw_ER.data
+
+reset_timestep  0
+neigh_modify one 3000
+
+dump 1 all custom 50000 ${print_dir}/PVA-Tensile.dump id mol type x y z ix iy iz
+fix def1 all print ${sample_rate} "${temps} ${strain} ${SA_stressxx} ${SA_stressyy} ${SA_stresszz} ${SA_stressxy} ${SA_stressxz} ${SA_stressyz}" file ${print_dir}/PVA_Strain.txt screen no
+
+fix		1 all npt temp 300 300 ${tdamp} x ${press} ${press} ${pdamp} y ${press} ${press} ${pdamp} yz ${press} ${press} ${pdamp} xy ${press} ${press} ${pdamp} xz ${press} ${press} ${pdamp}
+
+fix     2 all deform 1 z erate 1E-6
+run 	2000000

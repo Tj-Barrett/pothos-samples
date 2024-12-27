@@ -1,0 +1,101 @@
+#mpirun -np 8 --bind-to socket -x OMP_NUM_THREADS=2 lmp -sf hybrid omp gpu -pk gpu 2 -in MullerPlatheReference-Crystallization_5m_210C.in
+#
+# ----------------- Init Section -----------------
+# sets up simulation
+variable tms        equal 5.0
+variable tdamp      equal ${tms}*100.0
+variable pdamp      equal ${tms}*1000.0
+
+#-----------------------------------------------------------
+# Simualtion Variables
+#-----------------------------------------------------------
+variable fname string MullerPlatheReference
+variable pint  string 500
+variable mint  string 500
+
+# print directory
+variable print_dir string 'ibi-converge'
+# data directory
+variable data_dir string 'ibi-data'
+
+shell mkdir ${print_dir}
+
+#-----------------------------------------------------------
+# Read
+#-----------------------------------------------------------
+# # Plathe Work
+
+units		real
+atom_style	molecular
+
+bond_style harmonic
+angle_style   table spline 181
+pair_style  lj/cut/gpu 11.0
+
+read_data    ${data_dir}/PVA_IBI_p500_m500_real.data
+# read_data    ${data_dir}/PVA_IBI_p500_m500_converge_real.data
+
+group polymer type 1
+mass 1 44.0
+
+# Plathe Work
+bond_coeff 1 100.0 2.66
+angle_coeff   1 ${data_dir}/CG-REAL-IBI-ER.PVA CG_PVA
+
+pair_modify shift yes
+variable alpha equal 0.85*1.85
+variable beta equal 4.7*1.024
+pair_coeff * * ${alpha} ${beta} 11.0
+
+# 2020 changed xyz to iso, added temp
+thermo		1000
+timestep	${tms}
+
+compute pe all pe/atom
+compute ke all ke/atom
+compute cpe all reduce ave c_pe
+compute cke all reduce ave c_ke
+
+thermo_style custom step temp c_cpe c_cke etotal press vol density
+
+variable press equal 1.0 # atomospheric pressure
+
+special_bonds lj 0.0 0.0 1.0
+
+dump 1 all custom 10000 ${print_dir}/PVA-ER.dump id mol type x y z ix iy iz
+
+label converge_loop
+variable converge_step loop 10
+	# do things
+	fix		1 all npt temp 300.0 300.0 ${tdamp} x ${press} ${press} ${pdamp} y ${press} ${press} ${pdamp} z ${press} ${press} ${pdamp}
+	run		10000
+
+	# if per atom energy is less than x, force convergence to continue
+	variable totalstep equal c_cke+c_cpe
+
+	# if first step, previous total energy is sufficiently large to prevent convergence.
+	if "${converge_step}==1 " then "variable totalprev equal 30000.0"
+
+	# percent difference of n and n-1 step
+	variable diff equal abs(${totalprev}-${totalstep})/${totalprev}*100
+	print "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"
+	print "Previous Total Energy : ${totalprev}"
+	print "Current Total Energy  : ${totalstep}"
+	print "Percent Difference : ${diff}"
+	variable totalprev equal ${totalstep}
+
+	# if less than 1% difference, consider it converged
+	if "${diff}<1.0" then "jump SELF converge_break"
+	print "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"
+
+next converge_step
+jump SELF converge_loop
+label converge_break
+
+write_data    ${print_dir}/PVA_CG_p500_m500_ER-C.data
+
+compute rdf all rdf 200 
+fix rdf all ave/time 100 1 100 c_rdf[*] file ${print_dir}/PVA-ER.rdf mode vector
+dump 2 all custom 1 ${print_dir}/PVA-RE.dump id mol type x y z xu yu zu
+
+run 0
